@@ -70,11 +70,31 @@ void solveSym_serial(int n, double *a, double *x, double *b) {
 
 /* solve Ax = b */
 void solveSym(int rank, int nprocesses, int n, double *a, double *x, double *b) {
-  int i, j, k;
-  double *local_a = malloc(sizeof(double) * n * (n + nprocesses - 1) / nprocesses);
+  int i, j, k, tag, receiver, mpi_result, row;
+  int nrows_local = (n + nprocesses - 1) / nprocesses
+  double *local_a = malloc(sizeof(double) * n * nrows_local);
+  MPI_Request request;
+
   assert(local_a != NULL);
   //deliver row data to each other processes from root process
-  for(i = 0; i < n; i++){
+  if (rank == ROOT_RANK){
+    for(i = 0; i < n; i++){
+      tag = i / nprocesses;
+      receiver = i % nprocesses;
+      if (receiver != 0){
+        mpi_result = MPI_Isend(ELM(a, i, 0), sizeof(double) * (i + 1), MPI_DOUBLE, receiver, tag, MPI_COMM_WORLD, &request);
+        assert(mpi_result == MPI_SUCCESS);
+      }
+    }
+    for(i = 0; i < (n - 1) / nprocesses; i++){
+      row = i * nprocesses;
+      memcpy(ELM(local_a, i, 0), ELM(a, row, 0), sizeof(double) * row);
+    }
+  }else {
+
+        int MPI_Irecv(void *buf, int count, MPI_Datatype datatype, int source,
+            int tag, MPI_Comm comm, MPI_Request *request)
+          MPI_DOUBLE
   }
 
   /* LDLT decomposition: A = L * D * L^t */
