@@ -3,9 +3,14 @@
 #include <math.h>
 #include <assert.h>
 #include <mpi.h>
+#include <string.h>
 
 #define ROOT_RANK 0
 #define RUN_SERIAL 1
+#define N 30
+
+//matrix element - row major
+#define ELM(a, r, c, ld) (a + (r) * (ld) + c)
 
 /* matrix-vector multiply : y = A * x, where 
    A is symmetric and only lower half are stored */
@@ -15,10 +20,10 @@ void symMatVec(int n, double *a, double *x, double *y) {
   for (i=0; i< n; i++) {
     double t = 0.0;
     for (j=0; j<= i; j++)
-      t += a[i*n+j] * x[j];
+      t += *ELM(a, i, j, n) * x[j];
 
     for (j= i+1; j< n; j++)
-      t += a[j*n+i] * x[j];
+      t += *ELM(a, j, i, n) * x[j];
 
     y[i] = t;
   }
@@ -30,14 +35,14 @@ void solveSym_serial(int n, double *a, double *x, double *b) {
 
   /* LDLT decomposition: A = L * D * L^t */
   for (i=0; i< n; i++) {
-    double invp = 1.0 / a[i*n+i];
+    double invp = 1.0 / *ELM(a, i, i, n);
 
     for (j= i+1; j< n; j++) {
-      double aji = a[j*n+i];
-      a[j*n+i] *= invp;
+      double aji = *ELM(a, j, i, n);
+      *ELM(a,j, i, n) *= invp;
 
       for (k= i+1; k<= j; k++)
-        a[j*n+k] -= aji * a[k*n+i];
+        *ELM(a, j, k, n) -= aji * *ELM(a, k, i, n);
     }
   }
 
@@ -47,26 +52,21 @@ void solveSym_serial(int n, double *a, double *x, double *b) {
     double t = b[i];
 
     for (j=0; j< i; j++)
-      t -= a[i*n+j] * x[j];
+      t -= *ELM(a, i, j, n) * x[j];
 
     x[i] = t;
   }
 
   /* backward solve D L^t x = y */
   for (i= n-1; i>= 0; i--) {
-    double t = x[i] / a[i*n+i];
+    double t = x[i] / *ELM(a, i, i, n);
 
     for (j= i+1; j< n; j++)
-      t -= a[j*n+i] * x[j];
+      t -= *ELM(a, j, i, n) * x[j];
 
     x[i] = t;
   }
 }
-
-//matrix element - row major
-#define ELM(a, r, c, ld) (a)[(r) * (ld) + c]
-//matrix element - column major
-#define ELM_C(a, r, c, ld) (a)[r + (c) * (ld)]
 
 //calculate number of rows for process with rank
 int get_nrows(int n, int np, int rank){
@@ -79,7 +79,7 @@ int get_row(int np, int rank, int local_row){
 
 /* solve Ax = b */
 void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
-  int i, j, k, tag, receiver, mpi_result, row, displs, recvcounts, skipped_rows_count, sender;
+  int i, j, k, tag, receiver, mpi_result, row, *displs, *recvcounts, skipped_rows_count, sender;
   int nrows_local = get_nrows(n, np, rank);
   double *local_a = malloc(sizeof(double) * n * nrows_local);
   double *local_a_t = malloc(sizeof(double) * n * nrows_local);
@@ -98,7 +98,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   requests = malloc(sizeof(MPI_Request) * nrequests);
   statuses = malloc(sizeof(MPI_Status) * nrequests);
   displs = malloc(sizeof(int) * np);
-  recvcounts = malloc(sizeof(nit) * np);
+  recvcounts = malloc(sizeof(int) * np);
 
   //root process
   if (rank == ROOT_RANK){
@@ -109,8 +109,8 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
       receiver = i % np;
       if (receiver != 0){
         mpi_result = MPI_Isend(ELM(a, i, 0, n), i + 1, MPI_DOUBLE, receiver, tag, MPI_COMM_WORLD, requests + j);
-        j++;
         assert(mpi_result == MPI_SUCCESS);
+        j++;
       }
     }
     //copy to my own
@@ -124,10 +124,12 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     for(i = 0; i < nrows_local; i++){
       row = get_row(np, rank, i);
       tag = i;
-      MPI_Irecv(ELM(local_a, i, 0, n), row, MPI_DOUBLE, ROOT_RANK, tag, MPI_COMM_WORLD, requests + i);
+      mpi_result = MPI_Irecv(ELM(local_a, i, 0, n), row, MPI_DOUBLE, ROOT_RANK, tag, MPI_COMM_WORLD, requests + i);
       assert(mpi_result == MPI_SUCCESS);
     }
+    printf("process %d\n", rank);
     mpi_result = MPI_Waitall(nrequests, requests, statuses);
+    printf("proces %d waitall\n", rank);
     assert(mpi_result == MPI_SUCCESS);
   }
 
@@ -135,7 +137,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   for(i = 0; i < nrows_local; i++){
     get_row(np, rank, i);
     for(j = 0; j < row; j++){
-      ELM(local_a_t, j, i, nrows_local) = ELM(local_a, i, j, n);
+      *ELM(local_a_t, j, i, nrows_local) = *ELM(local_a, i, j, n);
     }
   }
 
@@ -166,20 +168,20 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     skipped_rows_count = get_nrows(i, np, rank);
     for(j = skipped_rows_count; j < nrows_local; j++){
       //first elm
-      ELM(local_a_t, i, j, nrows_local) /= first_column[0];
+      *ELM(local_a_t, i, j, nrows_local) /= first_column[0];
       row = get_row(np, rank, j);
       //other elms
       for(k = i + 1; k < row; k++)
-        ELM(local_a_t, k, j, nrows_local) -= first_column[0] * first_column[k - i];
+        *ELM(local_a_t, k, j, nrows_local) -= first_column[0] * first_column[k - i];
     }
-    MPI_Barrier();
+    MPI_Barrier(MPI_COMM_WORLD);
   }
 
   //transpose back to row-major
   for(i = 0; i < nrows_local; i++){
     row = get_row(np, rank, i);
     for(j = 0; j < row; j++){
-      ELM(local_a_t, j, i, nrows_local) = ELM(local_a, i, j, n);
+      *ELM(local_a_t, j, i, nrows_local) = *ELM(local_a, i, j, n);
     }
     if (rank != ROOT_RANK){
       //trasfer back to root process
@@ -222,17 +224,17 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
       double t = b[i];
 
       for (j=0; j< i; j++)
-        t -= a[i*n+j] * x[j];
+        t -= *ELM(a, i, j, n) * x[j];
 
       x[i] = t;
     }
 
     /* backward solve D L^t x = y */
     for (i= n-1; i>= 0; i--) {
-      double t = x[i] / a[i*n+i];
+      double t = x[i] / *ELM(a, i, i, n);
 
       for (j= i+1; j< n; j++)
-        t -= a[j*n+i] * x[j];
+        t -= *ELM(a, j, i, n) * x[j];
 
       x[i] = t;
     }
@@ -248,15 +250,15 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   free(allgather_buf);
   free(displs);
   free(recvcounts);
-  free(a_local_t);
+  free(local_a_t);
 }
 
-double norm(double *x, double* y, n){
+double norm(double *x, double* y, int n){
   /* check error norm */
   double e = 0;
   int i;
   for (i=0; i< n; i++)
-    e += (x[i] - xx[i]) * (x[i] - xx[i]);
+    e += (x[i] - y[i]) * (x[i] - y[i]);
   return sqrt(e);
 }
 
@@ -272,21 +274,16 @@ int main(int argc, char **argv) {
   int world_rank;
   MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
 
-  char processor_name[MPI_MAX_PROCESSOR_NAME];
-  int name_len;
   int n, i, j;
   double *a, *xx, *b, *x, e, s, *a_copy, *b_copy;
   double time_start, time_stop;
 
+  n = N;
+
   if (world_rank == ROOT_RANK){
 
-    // Get the name of the processor
-    MPI_Get_processor_name(processor_name, &name_len);
-
     // Print off a hello world message
-    printf("Processor name: %s\nNumber of processes: %d\n", processor_name, world_size);
-
-    n = 30;
+    printf("Number of processes: %d\n", world_size);
 
     /* matrix */
     a = malloc(sizeof(double) * n * n);
@@ -295,25 +292,25 @@ int main(int argc, char **argv) {
     /* fill lower triangular elements */
     for (i=0; i< n; i++)
       for (j=0; j< i; j++)
-        a[i*n+j] = rand()/(RAND_MAX + 1.0);
+        *ELM(a, i, j, n) = rand()/(RAND_MAX + 1.0);
 
     /* fill diagonal elements */
     for (i=0; i< n; i++) {
       s = 0.0;
       for (j=0; j< i; j++)
-        s += a[i*n+j];
+        s += *ELM(a, i, j, n);
 
       for (j= i+1; j< n; j++)
-        s += a[j*n+i];		/* upper triangular */
+        s += *ELM(a, j, i, n);		/* upper triangular */
 
-      a[i*n+i] = s + 1.0;		/* diagonal dominant */
+      *ELM(a, i, i, n) = s + 1.0;		/* diagonal dominant */
     }
 
     /* first make the solution */
     xx = malloc(sizeof(double) * n);
     assert(xx != NULL);
 
-    for (i=0; i< n * n; i++)
+    for (i=0; i< n; i++)
       xx[i] = 1.0;			/* or anything you like */
 
     /* make right hand side b = Ax */
@@ -337,9 +334,9 @@ int main(int argc, char **argv) {
     memcpy(b_copy, b, sizeof(double) * n);
 
     //serial solver
-    time_start = mpi_wtime();
+    time_start = MPI_Wtime();
     solveSym_serial(n, a_copy, x, b_copy);
-    time_stop = mpi_wtime();
+    time_stop = MPI_Wtime();
     printf("Serial time: %.8f sec\n", time_stop - time_start);
 
     e = norm(x, xx, n);
@@ -352,13 +349,13 @@ int main(int argc, char **argv) {
     memset(x, 0, sizeof(double) * n);
   }
 
-  MPI_Barrier();
+  MPI_Barrier(MPI_COMM_WORLD);
   //parallel version
-  time_start = mpi_wtime();
+  time_start = MPI_Wtime();
   /* solve: the main computation */
   solveSym(world_rank, world_size, n, a, x, b);
-  MPI_Barrier();
-  time_stop = mpi_wtime();
+  MPI_Barrier(MPI_COMM_WORLD);
+  time_stop = MPI_Wtime();
 
   if (world_rank == ROOT_RANK){
     printf("Paralle time: %.8f sec\n", time_stop - time_start);

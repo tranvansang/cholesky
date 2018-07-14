@@ -89,7 +89,7 @@ int main(void) {
   double *xx = malloc(sizeof(double) * n);
   assert(xx != NULL);
 
-  for (i=0; i< n * n; i++)
+  for (i=0; i< n ; i++)
     xx[i] = 1.0;			/* or anything you like */
 
   /* make right hand side b = Ax */
