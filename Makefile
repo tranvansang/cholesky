@@ -4,12 +4,9 @@ USER = t04019
 HOST = reedbush-u.cc.u-tokyo.ac.jp
 
 all-remote:
-	make copy
-	ssh $(USER)@$(HOST) -t "make all-local -C $(ROOT_DIR)"
+	make copy && ssh $(USER)@$(HOST) -t "make all-local -C $(ROOT_DIR)"
 all-local:
-	make clean
-	make compile
-	make run
+	make clean && make compile && make run
 run:
 	qsub -N $(JOB_NAME) run.bash
 	#qsub -hold_jid $(JOB_NAME) -cwd echo "Job $(JOB_NAME) finished"

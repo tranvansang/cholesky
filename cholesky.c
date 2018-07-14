@@ -7,10 +7,31 @@
 
 #define ROOT_RANK 0
 #define RUN_SERIAL 1
-#define N 30
+#define N 5
+#define DEBUG
+#define VERBOSE
+
+#ifdef DEBUG
+#define MPI(x) mpi_result = x; \
+                            if (mpi_result != MPI_SUCCESS) { \
+                              print_error(mpi_result); \
+                            } \
+assert(mpi_result == MPI_SUCCESS);
+#else // DEBUG
+#define MPI(x) mpi_result = x; assert(mpi_result == MPI_SUCCESS);
+#endif // DEBUG
 
 //matrix element - row major
 #define ELM(a, r, c, ld) (a + (r) * (ld) + c)
+
+void print_error(int mpi_result){
+  int eclass, estr_len;
+  char estring[MPI_MAX_ERROR_STRING];
+  MPI_Error_class(mpi_result, &eclass);
+  MPI_Error_string(mpi_result, estring, &estr_len);
+  printf("Error %d, class %d: %s\n", mpi_result, eclass, estring);
+  fflush(stdout);
+}
 
 /* matrix-vector multiply : y = A * x, where 
    A is symmetric and only lower half are stored */
@@ -26,6 +47,15 @@ void symMatVec(int n, double *a, double *x, double *y) {
       t += *ELM(a, j, i, n) * x[j];
 
     y[i] = t;
+  }
+}
+
+void print_matrix(double *a, int nrow, int ncol, int ld){
+  int i, j;
+  for(i = 0; i < nrow; i++){
+    for(j = 0; j <= i; j++)
+      printf("%.10lf\t", *ELM(a, i, j, ld));
+    printf("\n");
   }
 }
 
@@ -45,6 +75,11 @@ void solveSym_serial(int n, double *a, double *x, double *b) {
         *ELM(a, j, k, n) -= aji * *ELM(a, k, i, n);
     }
   }
+#ifdef VERBOSE
+    printf("array after serial ldlt: \n");
+    print_matrix(a, n, n, n);
+    printf("\n");
+#endif // VERBOSE
 
   /* forward solve L y = b: but y is stored in x
      can be merged to the previous loop */
@@ -108,8 +143,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
       tag = i / np;
       receiver = i % np;
       if (receiver != 0){
-        mpi_result = MPI_Isend(ELM(a, i, 0, n), i + 1, MPI_DOUBLE, receiver, tag, MPI_COMM_WORLD, requests + j);
-        assert(mpi_result == MPI_SUCCESS);
+        MPI(MPI_Isend(ELM(a, i, 0, n), i + 1, MPI_DOUBLE, receiver, tag, MPI_COMM_WORLD, requests + j));
         j++;
       }
     }
@@ -124,13 +158,14 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     for(i = 0; i < nrows_local; i++){
       row = get_row(np, rank, i);
       tag = i;
-      mpi_result = MPI_Irecv(ELM(local_a, i, 0, n), row, MPI_DOUBLE, ROOT_RANK, tag, MPI_COMM_WORLD, requests + i);
-      assert(mpi_result == MPI_SUCCESS);
+      MPI(MPI_Irecv(ELM(local_a, i, 0, n), row + 1, MPI_DOUBLE, ROOT_RANK, tag, MPI_COMM_WORLD, requests + i));
     }
-    printf("process %d\n", rank);
-    mpi_result = MPI_Waitall(nrequests, requests, statuses);
-    printf("proces %d waitall\n", rank);
-    assert(mpi_result == MPI_SUCCESS);
+    MPI(MPI_Waitall(nrequests, requests, statuses));
+    /*for(i = 0; i < nrows_local; i++){*/
+      /*printf("rank %d status %d: %d\n", rank, i, statuses[i].MPI_ERROR);*/
+      /*if (statuses[i].MPI_ERROR != MPI_SUCCESS)*/
+        /*print_error(statuses[i].MPI_ERROR);*/
+    /*}*/
   }
 
   //transpose to column major
@@ -143,8 +178,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
 
   //wait all requests in root process
   if (rank == ROOT_RANK){
-    mpi_result = MPI_Waitall(nrequests, requests, statuses);
-    assert(mpi_result == MPI_SUCCESS);
+    MPI(MPI_Waitall(nrequests, requests, statuses));
   }
   /* LDLT decomposition: A = L * D * L^t */
   for(i = 0; i < n; i++){
@@ -154,8 +188,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     }
     //broadcast first column (i.e. first row of column-major) of current iteration
     skipped_rows_count = get_nrows(i, np, rank);
-    mpi_result = MPI_Allgatherv(ELM(local_a_t, i, skipped_rows_count, nrows_local), recvcounts[rank], MPI_DOUBLE, allgather_buf, recvcounts, displs, MPI_DOUBLE, MPI_COMM_WORLD);
-    assert(mpi_result == MPI_SUCCESS);
+    MPI(MPI_Allgatherv(ELM(local_a_t, i, skipped_rows_count, nrows_local), recvcounts[rank], MPI_DOUBLE, allgather_buf, recvcounts, displs, MPI_DOUBLE, MPI_COMM_WORLD));
 
     //put elms of collected buffer into correct order
     for(j = 0; j < np; j++){
@@ -185,16 +218,15 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     }
     if (rank != ROOT_RANK){
       //trasfer back to root process
-      mpi_result = MPI_Isend(
+      MPI( MPI_Isend(
           ELM(local_a, i, 0, n),
-          sizeof(double) * row,
+          row + 1,
           MPI_DOUBLE,
           ROOT_RANK,
           i,
           MPI_COMM_WORLD,
           requests + i
-          );
-      assert(mpi_result == MPI_SUCCESS);
+          ));
     }
   }
   if (rank == ROOT_RANK){
@@ -204,20 +236,32 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
       tag = i / np;
       sender = i % np;
       if (sender != 0){
-        mpi_result = MPI_Irecv(ELM(a, i, 0, n), i + 1, MPI_DOUBLE, sender, tag, MPI_COMM_WORLD, requests + j);
+        MPI(MPI_Irecv(ELM(a, i, 0, n), i + 1, MPI_DOUBLE, sender, tag, MPI_COMM_WORLD, requests + j));
         j++;
-        assert(mpi_result == MPI_SUCCESS);
       }
     }
     //copy from my own
     //(n + np - 1) / np = nrows_local
     for(i = 0; i < nrows_local; i++){
       row = get_row(np, rank, i);
-      memcpy(ELM(a, row, 0, n), ELM(local_a, i, 0, n), sizeof(double) * row);
+      memcpy(ELM(a, row, 0, n), ELM(local_a, i, 0, n), sizeof(double) * (row + 1));
     }
-    mpi_result = MPI_Waitall(nrequests, requests, statuses);
-    assert(mpi_result == MPI_SUCCESS);
+    /*MPI(MPI_Waitall(nrequests, requests, statuses));*/
+    MPI(MPI_Waitall(nrequests, requests, statuses));
+    /*for(i = 0; i < nrows_local; i++){*/
+      /*if (statuses[i].MPI_ERROR != MPI_SUCCESS){*/
+        /*printf("rank %d status %d: %d\n", rank, i, statuses[i].MPI_ERROR);*/
+        /*print_error(statuses[i].MPI_ERROR);*/
+      /*}*/
+    /*}*/
 
+#ifdef VERBOSE
+    if (rank == ROOT_RANK){
+      printf("array after parallel computation: \n");
+      print_matrix(a, n, n, n);
+      printf("\n");
+    }
+#endif // VERBOSE
     /* forward solve L y = b: but y is stored in x
        can be merged to the previous loop */
     for (i=0; i< n; i++) {
@@ -239,8 +283,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
       x[i] = t;
     }
   } else {
-    mpi_result = MPI_Waitall(nrequests, requests, statuses);
-    assert(mpi_result == MPI_SUCCESS);
+    MPI(MPI_Waitall(nrequests, requests, statuses));
   }
 
   free(statuses);
@@ -262,17 +305,34 @@ double norm(double *x, double* y, int n){
   return sqrt(e);
 }
 
+//error handler
+void cholesky_mpi_error_handler( MPI_Comm *comm, int *err, ... )
+{
+    if (*err != MPI_ERR_OTHER) {
+        printf( "Unexpected error code\n" );fflush(stdout);
+    } else {
+      printf("error caused in comm %d, error: %d", *comm, err ? *err : -1); fflush(stdout);
+    }
+}
+
 int main(int argc, char **argv) {
+  int mpi_result;
   // Initialize the MPI environment
-  MPI_Init(&argc, &argv);
+  MPI(MPI_Init(&argc, &argv));
+
+  //set error handler
+  MPI_Errhandler err_handler;
+  /*MPI(MPI_Comm_create_errhandler(&cholesky_mpi_error_handler, &err_handler));*/
+  /*MPI(MPI_Comm_set_errhandler(MPI_COMM_WORLD, err_handler));*/
+  MPI(MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN));
 
   // Get the number of processes
   int world_size;
-  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  MPI(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
 
   // Get the rank of the process
   int world_rank;
-  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  MPI(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
 
   int n, i, j;
   double *a, *xx, *b, *x, e, s, *a_copy, *b_copy;
@@ -305,6 +365,11 @@ int main(int argc, char **argv) {
 
       *ELM(a, i, i, n) = s + 1.0;		/* diagonal dominant */
     }
+#ifdef VERBOSE
+    printf("original matrix: \n");
+    print_matrix(a, n, n, n);
+    printf("\n");
+#endif // VERBOSE
 
     /* first make the solution */
     xx = malloc(sizeof(double) * n);
@@ -370,6 +435,8 @@ int main(int argc, char **argv) {
     free(b);
     free(x);
   }
+  //free error handler
+  /*MPI_Errhandler_free( &err_handler );*/
   // Finalize the MPI environment.
   MPI_Finalize();
   return 0;
