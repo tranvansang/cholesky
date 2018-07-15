@@ -22,7 +22,7 @@ assert(mpi_result == MPI_SUCCESS);
 #endif // DEBUG
 
 //matrix element - row major
-#define ELM(a, r, c, ld) (a + (r) * (ld) + c)
+#define ELM(a, r, c, ld) ((a) + (r) * (ld) + c)
 
 void print_error(int mpi_result){
   int eclass, estr_len;
@@ -50,10 +50,28 @@ void symMatVec(int n, double *a, double *x, double *y) {
   }
 }
 
-void print_matrix(double *a, int nrow, int ncol, int ld){
+void print_lower(double *a, int n, int ld){
+  int i, j;
+  for(i = 0; i < n; i++){
+    for(j = 0; j <= i; j++)
+      printf("%.10lf\t", *ELM(a, i, j, ld));
+    printf("\n");
+  }
+}
+void print_upper(double *a, int n, int ld){
+  int i, j;
+  for(i = 0; i < n; i++){
+    for(j = 0; j < n; j++)
+      if (j < i) printf("__________\t");
+      else printf("%.10lf\t", *ELM(a, i, j, ld));
+    printf("\n");
+  }
+}
+
+void print_full(double *a, int nrow, int ncol, int ld){
   int i, j;
   for(i = 0; i < nrow; i++){
-    for(j = 0; j <= i; j++)
+    for(j = 0; j <ncol; j++)
       printf("%.10lf\t", *ELM(a, i, j, ld));
     printf("\n");
   }
@@ -76,13 +94,13 @@ void solveSym_serial(int n, double *a, double *x, double *b) {
     }
 #ifdef VERBOSE
     printf("matrix after iteration %d\n", i);
-    print_matrix(a, n, n, n);
+    print_lower(a, n, n);
     printf("\n");
 #endif // VERBOSE
   }
 #ifdef VERBOSE
     printf("array after serial ldlt: \n");
-    print_matrix(a, n, n, n);
+    print_lower(a, n, n);
     printf("\n");
 #endif // VERBOSE
 
@@ -130,7 +148,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   assert(local_a_t != NULL);
   assert(first_column != NULL);
   assert(allgather_buf != NULL);
-  double tmp;
+  double tmp, aji;
   MPI_Request *requests;
   MPI_Status *statuses;
   int nrequests;
@@ -202,24 +220,53 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
       for(k = 0; k < recvcounts[j]; k++)
         first_column[k * np + j] = allgather_buf[displs[j] + k];
     }
+#ifdef VERBOSE
+    if (i == 1)
+    for(j = 0; j < np; j++){
+      MPI_Barrier(MPI_COMM_WORLD);
+      if (rank == j){
+        printf("first column (rank = %d): ", j);
+        for(k = 0; k < n - i; k++)
+          printf("%.5lf\t", first_column[k]);
+        printf("\n");
+      }
+    }
+#endif
+
+    //pre devide first_column to speedup (reduce deviding operation)
+    row = get_row(np, rank, nrows_local -1);
+    for(j = i + 1; j <= row; j++)
+      first_column[j] /= first_column[i];
 
     //do LDLT calculation
     //for all rows
     skipped_rows_count = get_nrows(i + 1, np, rank);
     //get_nrows of i + 1 because we are going to skip the row i (do j-loop from i+ 1 to n)
     for(j = skipped_rows_count; j < nrows_local; j++){
-      //first elm
-      *ELM(local_a_t, i, j, nrows_local) /= first_column[0];
+      //backup aji
+      aji = *ELM(local_a_t, i, j, nrows_local);
       row = get_row(np, rank, j);
+      //first elm
+      *ELM(local_a_t, i, j, nrows_local) = first_column[row];
       //other elms
-      for(k = i + 1; k < row; k++)
-        *ELM(local_a_t, k, j, nrows_local) -= first_column[0] * first_column[k - i];
+      for(k = i + 1; k <= row; k++)
+        *ELM(local_a_t, k, j, nrows_local) -= aji * first_column[k];
     }
     MPI_Barrier(MPI_COMM_WORLD);
 #ifdef VERBOSE
+    for(j = 0; j < np; j++){
+      if (rank == j){
+        printf("matrix(transposed) after iteration %d rank %d\n", i, j);
+        print_full(local_a_t, get_row(np, rank, nrows_local - 1) + 1, nrows_local, nrows_local);
+        printf("\n");
+        fflush(stdout);
+      }
+      MPI_Barrier(MPI_COMM_WORLD);
+    }
     if (rank == ROOT_RANK){
-      printf("matrix after iteration %d\n", i);
-      print_matrix(a, n, n, n);
+      printf("first column: ");
+      for(j = 0; j < n - i; j++)
+        printf("%.5lf\t", first_column[j]);
       printf("\n");
     }
 #endif // VERBOSE
@@ -274,7 +321,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
 #ifdef VERBOSE
     if (rank == ROOT_RANK){
       printf("array after parallel computation: \n");
-      print_matrix(a, n, n, n);
+      print_lower(a, n, n);
       printf("\n");
     }
 #endif // VERBOSE
@@ -383,7 +430,7 @@ int main(int argc, char **argv) {
     }
 #ifdef VERBOSE
     printf("original matrix: \n");
-    print_matrix(a, n, n, n);
+    print_lower(a, n, n);
     printf("\n");
 #endif // VERBOSE
 
