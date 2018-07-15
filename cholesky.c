@@ -74,6 +74,11 @@ void solveSym_serial(int n, double *a, double *x, double *b) {
       for (k= i+1; k<= j; k++)
         *ELM(a, j, k, n) -= aji * *ELM(a, k, i, n);
     }
+#ifdef VERBOSE
+    printf("matrix after iteration %d\n", i);
+    print_matrix(a, n, n, n);
+    printf("\n");
+#endif // VERBOSE
   }
 #ifdef VERBOSE
     printf("array after serial ldlt: \n");
@@ -108,6 +113,7 @@ int get_nrows(int n, int np, int rank){
   return (n + np - rank - 1) / np;
 }
 
+//get original row index (size) from local row
 int get_row(int np, int rank, int local_row){
   return local_row * np + rank;
 }
@@ -151,7 +157,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     //(n + np - 1) / np = nrows_local
     for(i = 0; i < nrows_local; i++){
       row = get_row(np, rank, i);
-      memcpy(ELM(local_a, i, 0, n), ELM(a, row, 0, n), sizeof(double) * row);
+      memcpy(ELM(local_a, i, 0, n), ELM(a, row, 0, n), sizeof(double) * (row + 1));
     }
   }else {
     //child process
@@ -170,8 +176,9 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
 
   //transpose to column major
   for(i = 0; i < nrows_local; i++){
-    get_row(np, rank, i);
-    for(j = 0; j < row; j++){
+    row = get_row(np, rank, i);
+    //also take diagonal elms
+    for(j = 0; j <= row; j++){
       *ELM(local_a_t, j, i, nrows_local) = *ELM(local_a, i, j, n);
     }
   }
@@ -198,7 +205,8 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
 
     //do LDLT calculation
     //for all rows
-    skipped_rows_count = get_nrows(i, np, rank);
+    skipped_rows_count = get_nrows(i + 1, np, rank);
+    //get_nrows of i + 1 because we are going to skip the row i (do j-loop from i+ 1 to n)
     for(j = skipped_rows_count; j < nrows_local; j++){
       //first elm
       *ELM(local_a_t, i, j, nrows_local) /= first_column[0];
@@ -208,13 +216,21 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
         *ELM(local_a_t, k, j, nrows_local) -= first_column[0] * first_column[k - i];
     }
     MPI_Barrier(MPI_COMM_WORLD);
+#ifdef VERBOSE
+    if (rank == ROOT_RANK){
+      printf("matrix after iteration %d\n", i);
+      print_matrix(a, n, n, n);
+      printf("\n");
+    }
+#endif // VERBOSE
   }
 
   //transpose back to row-major
   for(i = 0; i < nrows_local; i++){
     row = get_row(np, rank, i);
-    for(j = 0; j < row; j++){
-      *ELM(local_a_t, j, i, nrows_local) = *ELM(local_a, i, j, n);
+    //also take diagonal elms
+    for(j = 0; j <= row; j++){
+      *ELM(local_a, i, j, n) = *ELM(local_a_t, j, i, nrows_local);
     }
     if (rank != ROOT_RANK){
       //trasfer back to root process
