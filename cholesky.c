@@ -176,26 +176,28 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   if (rank == ROOT_RANK){
     j = 0;
     //deliver row data to each other processes from root process
-#pragma omp parallel for private(tag, receiver, k)
+#pragma omp parallel for private(tag, receiver, k, i)
     for(i = 0; i < n; i++){
       tag = i / np;
       receiver = i % np;
+      printf("hello from rank %d i = %d thread = %d\n", rank, i, omp_get_thread_num());
       if (receiver != 0){
 #pragma omp critical
         k = j++;
+        printf("hello from rank %d i = %d thread = %d isent %d\n", rank, i, omp_get_thread_num(), k);
         MPI(MPI_Isend(ELM(a, i, 0, n), i + 1, MPI_DOUBLE, receiver, tag, MPI_COMM_WORLD, requests + k));
       }
     }
     //copy to my own
     //(n + np - 1) / np = nrows_local
-#pragma omp parallel for private(row)
+#pragma omp parallel for private(row, i)
     for(i = 0; i < nrows_local; i++){
       row = get_row(np, rank, i);
       memcpy(ELM(local_a, i, 0, n), ELM(a, row, 0, n), sizeof(double) * (row + 1));
     }
   }else {
     //child process
-#pragma omp parallel for private(row, tag)
+#pragma omp parallel for private(row, tag, i)
     for(i = 0; i < nrows_local; i++){
       row = get_row(np, rank, i);
       tag = i;
@@ -210,11 +212,11 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   }
 
   //transpose to column major
-#pragma omp parallel for private(row)
+#pragma omp parallel for private(row, i)
   for(i = 0; i < nrows_local; i++){
     //also take diagonal elms
     row = get_row(np, rank, i);
-#pragma omp parallel for
+#pragma omp parallel for private(j)
     for(j = 0; j <= row; j++){
       *ELM(local_a_t, j, i, nrows_local) = *ELM(local_a, i, j, n);
     }
@@ -226,7 +228,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   }
   /* LDLT decomposition: A = L * D * L^t */
   for(i = 0; i < n; i++){
-#pragma omp parallel for
+#pragma omp parallel for private(j)
     for(j = 0; j < np; j++){
       recvcounts[j] = get_nrows(n, np, j) - get_nrows(i, np, j);
       displs[j] = j == 0 ? 0 : displs[j - 1] + recvcounts[j  -1];
@@ -248,7 +250,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
 #endif
 
     //put elms of collected buffer into correct order
-#pragma omp parallel for collapse(2)
+#pragma omp parallel for collapse(2) private(j, k)
     for(j = 0; j < np; j++){
       for(k = 0; k < recvcounts[j]; k++)
         first_column[(k + get_nrows(i, np, j)) * np + j] = allgather_buf[displs[j] + k];
@@ -268,7 +270,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
 
     //pre devide first_column to speedup (reduce deviding operation)
     row = get_row(np, rank, nrows_local -1);
-#pragma omp parallel for
+#pragma omp parallel for private(j)
     for(j = i + 1; j <= row; j++)
       first_column[j] /= first_column[i];
 
@@ -276,7 +278,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     //for all rows
     skipped_rows_count = get_nrows(i + 1, np, rank);
     //get_nrows of i + 1 because we are going to skip the row i (do j-loop from i+ 1 to n)
-#pragma omp parallel for private(aji, row)
+#pragma omp parallel for private(aji, row, j)
     for(j = skipped_rows_count; j < nrows_local; j++){
       //backup aji
       aji = *ELM(local_a_t, i, j, nrows_local);
@@ -284,7 +286,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
       //first elm
       *ELM(local_a_t, i, j, nrows_local) = first_column[row];
       //other elms
-#pragma omp parallel for
+#pragma omp parallel for private(k)
       for(k = i + 1; k <= row; k++)
         *ELM(local_a_t, k, j, nrows_local) -= aji * first_column[k];
     }
@@ -309,11 +311,11 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   }
 
   //transpose back to row-major
-#pragma omp parallel for private(row)
+#pragma omp parallel for private(row, i)
   for(i = 0; i < nrows_local; i++){
     row = get_row(np, rank, i);
     //also take diagonal elms
-#pragma omp parallel for
+#pragma omp parallel for private(j)
     for(j = 0; j <= row; j++){
       *ELM(local_a, i, j, n) = *ELM(local_a_t, j, i, nrows_local);
     }
@@ -333,7 +335,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   if (rank == ROOT_RANK){
     //receive calculated buffer from all processes
     j = 0;
-#pragma omp parallel for private(tag, sender, k)
+#pragma omp parallel for private(tag, sender, k, i)
     for(i = 0; i < n; i++){
       tag = i / np;
       sender = i % np;
@@ -345,7 +347,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     }
     //copy from my own
     //(n + np - 1) / np = nrows_local
-#pragma omp parallel for private(row)
+#pragma omp parallel for private(row, i)
     for(i = 0; i < nrows_local; i++){
       row = get_row(np, rank, i);
       memcpy(ELM(a, row, 0, n), ELM(local_a, i, 0, n), sizeof(double) * (row + 1));
@@ -371,7 +373,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     for (i=0; i< n; i++) {
       double t = b[i];
 
-#pragma omp parallel for reduction(-:t)
+#pragma omp parallel for reduction(-:t) private(j)
       for (j=0; j< i; j++)
         t -= *ELM(a, i, j, n) * x[j];
 
@@ -382,7 +384,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     for (i= n-1; i>= 0; i--) {
       double t = x[i] / *ELM(a, i, i, n);
 
-#pragma omp parallel for reduction(-:t)
+#pragma omp parallel for reduction(-:t) private(j)
       for (j= i+1; j< n; j++)
         t -= *ELM(a, j, i, n) * x[j];
 
