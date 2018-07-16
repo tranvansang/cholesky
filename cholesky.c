@@ -5,11 +5,22 @@
 #include <mpi.h>
 #include <string.h>
 
+//param
+//#define RUN_SERIAL
+#define RUN_PARALLEL
+#define N 500
+#define WEAK_SCALING
+// if weak_scaling is not defined, n = N * np
+
+//debug
+//#define DEBUG
+//#define VERBOSE
+//printing precision
+#define PRECISION 2
+
+//other constants
 #define ROOT_RANK 0
-#define RUN_SERIAL 1
-#define N 5
-#define DEBUG
-#define VERBOSE
+#define EPS 1e-10
 
 #ifdef DEBUG
 #define MPI(x) mpi_result = x; \
@@ -54,7 +65,7 @@ void print_lower(double *a, int n, int ld){
   int i, j;
   for(i = 0; i < n; i++){
     for(j = 0; j <= i; j++)
-      printf("%.10lf\t", *ELM(a, i, j, ld));
+      printf("%.*lf\t", PRECISION, *ELM(a, i, j, ld));
     printf("\n");
   }
 }
@@ -63,7 +74,7 @@ void print_upper(double *a, int n, int ld){
   for(i = 0; i < n; i++){
     for(j = 0; j < n; j++)
       if (j < i) printf("__________\t");
-      else printf("%.10lf\t", *ELM(a, i, j, ld));
+      else printf("%.*lf\t", PRECISION, *ELM(a, i, j, ld));
     printf("\n");
   }
 }
@@ -72,7 +83,7 @@ void print_full(double *a, int nrow, int ncol, int ld){
   int i, j;
   for(i = 0; i < nrow; i++){
     for(j = 0; j <ncol; j++)
-      printf("%.10lf\t", *ELM(a, i, j, ld));
+      printf("%.*lf\t", PRECISION, *ELM(a, i, j, ld));
     printf("\n");
   }
 }
@@ -127,12 +138,12 @@ void solveSym_serial(int n, double *a, double *x, double *b) {
 }
 
 //calculate number of rows for process with rank
-int get_nrows(int n, int np, int rank){
+inline int get_nrows(int n, int np, int rank){
   return (n + np - rank - 1) / np;
 }
 
 //get original row index (size) from local row
-int get_row(int np, int rank, int local_row){
+inline int get_row(int np, int rank, int local_row){
   return local_row * np + rank;
 }
 
@@ -214,20 +225,32 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     //broadcast first column (i.e. first row of column-major) of current iteration
     skipped_rows_count = get_nrows(i, np, rank);
     MPI(MPI_Allgatherv(ELM(local_a_t, i, skipped_rows_count, nrows_local), recvcounts[rank], MPI_DOUBLE, allgather_buf, recvcounts, displs, MPI_DOUBLE, MPI_COMM_WORLD));
+#ifdef VERBOSE
+    if (i == 1)
+    for(j = 0; j < np; j++){
+      MPI(MPI_Barrier(MPI_COMM_WORLD));
+      if (rank == j){
+        printf("allgather (rank = %d): ", j);
+        for(k = 0; k < n; k++)
+          printf("%.*lf\t", PRECISION, allgather_buf[k]);
+        printf("\n");
+      }
+    }
+#endif
 
     //put elms of collected buffer into correct order
     for(j = 0; j < np; j++){
       for(k = 0; k < recvcounts[j]; k++)
-        first_column[k * np + j] = allgather_buf[displs[j] + k];
+        first_column[(k + get_nrows(i, np, j)) * np + j] = allgather_buf[displs[j] + k];
     }
 #ifdef VERBOSE
     if (i == 1)
     for(j = 0; j < np; j++){
-      MPI_Barrier(MPI_COMM_WORLD);
+      MPI(MPI_Barrier(MPI_COMM_WORLD));
       if (rank == j){
         printf("first column (rank = %d): ", j);
-        for(k = 0; k < n - i; k++)
-          printf("%.5lf\t", first_column[k]);
+        for(k = i; k < n; k++)
+          printf("%.*lf\t", PRECISION, first_column[k]);
         printf("\n");
       }
     }
@@ -252,7 +275,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
       for(k = i + 1; k <= row; k++)
         *ELM(local_a_t, k, j, nrows_local) -= aji * first_column[k];
     }
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI(MPI_Barrier(MPI_COMM_WORLD));
 #ifdef VERBOSE
     for(j = 0; j < np; j++){
       if (rank == j){
@@ -261,12 +284,12 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
         printf("\n");
         fflush(stdout);
       }
-      MPI_Barrier(MPI_COMM_WORLD);
+      MPI(MPI_Barrier(MPI_COMM_WORLD));
     }
     if (rank == ROOT_RANK){
       printf("first column: ");
-      for(j = 0; j < n - i; j++)
-        printf("%.5lf\t", first_column[j]);
+      for(j = i; j < n; j++)
+        printf("%.*lf\t", PRECISION, first_column[j]);
       printf("\n");
     }
 #endif // VERBOSE
@@ -378,36 +401,18 @@ void cholesky_mpi_error_handler( MPI_Comm *comm, int *err, ... )
     }
 }
 
-int main(int argc, char **argv) {
-  int mpi_result;
-  // Initialize the MPI environment
-  MPI(MPI_Init(&argc, &argv));
+typedef struct {
+  double serial;
+  double parallel;
+} bmtime_t;
 
-  //set error handler
-  MPI_Errhandler err_handler;
-  /*MPI(MPI_Comm_create_errhandler(&cholesky_mpi_error_handler, &err_handler));*/
-  /*MPI(MPI_Comm_set_errhandler(MPI_COMM_WORLD, err_handler));*/
-  MPI(MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN));
-
-  // Get the number of processes
-  int world_size;
-  MPI(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
-
-  // Get the rank of the process
-  int world_rank;
-  MPI(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
-
-  int n, i, j;
+bmtime_t benchmark(int n, int np, int rank){
+  bmtime_t bmtime;
+  int i, j, mpi_result;
   double *a, *xx, *b, *x, e, s, *a_copy, *b_copy;
   double time_start, time_stop;
 
-  n = N;
-
-  if (world_rank == ROOT_RANK){
-
-    // Print off a hello world message
-    printf("Number of processes: %d\n", world_size);
-
+  if (rank == ROOT_RANK){
     /* matrix */
     a = malloc(sizeof(double) * n * n);
     assert(a != NULL);
@@ -450,9 +455,8 @@ int main(int argc, char **argv) {
     /* solution vector, pretend to be unknown */
     x = malloc(sizeof(double) * n);
     assert(x != NULL);
-  }
 
-  if (RUN_SERIAL && world_rank == ROOT_RANK){
+#ifdef RUN_SERIAL
     //clone data
     a_copy = malloc(sizeof(double) * n * n);
     assert(a_copy != NULL);
@@ -465,42 +469,102 @@ int main(int argc, char **argv) {
     time_start = MPI_Wtime();
     solveSym_serial(n, a_copy, x, b_copy);
     time_stop = MPI_Wtime();
-    printf("Serial time: %.8f sec\n", time_stop - time_start);
+    bmtime.serial = time_stop - time_start;
 
     e = norm(x, xx, n);
-    printf("error norm = %e\n", e);
-    printf("--- good if error is around n * 1e-16 or less\n");
+    if (e >= EPS){
+      bmtime.serial = -1;
+      fprintf(stderr, "expected error norm less than %e, but %e received while serial benchmark with size = %d\n", EPS, e, n);
+    }
 
     //free data
     free(a_copy);
     free(b_copy);
     memset(x, 0, sizeof(double) * n);
+#else // RUN_SERIAL
+    bmtime.serial = 0;
+#endif // RUN_SERIAL
   }
 
-  MPI_Barrier(MPI_COMM_WORLD);
+#ifdef RUN_PARALLEL
+  MPI(MPI_Barrier(MPI_COMM_WORLD));
   //parallel version
   time_start = MPI_Wtime();
   /* solve: the main computation */
-  solveSym(world_rank, world_size, n, a, x, b);
-  MPI_Barrier(MPI_COMM_WORLD);
+  solveSym(rank, np, n, a, x, b);
+  MPI(MPI_Barrier(MPI_COMM_WORLD));
   time_stop = MPI_Wtime();
 
-  if (world_rank == ROOT_RANK){
-    printf("Paralle time: %.8f sec\n", time_stop - time_start);
+  bmtime.parallel = time_stop - time_start;
 
+  if (rank == ROOT_RANK) {
     e = norm(x, xx, n);
-    printf("error norm = %e\n", e);
-    printf("--- good if error is around n * 1e-16 or less\n");
-
+    if (e >= EPS){
+      bmtime.parallel = -1;
+        fprintf(stderr, "expected error norm less than %e, but %e received while parallel benchmark with size = %d\n", EPS, e, n);
+    }
+  }
+#else // RUN_PARALLEL
+  bmtime.parallel = -1;
+#endif // RUN_PARALLEL
+  if (rank == ROOT_RANK){
     //free data
     free(a);
     free(xx);
     free(b);
     free(x);
   }
+  return bmtime;
+}
+
+int main(int argc, char **argv) {
+  int mpi_result, n;
+  double time_start, time_stop;
+
+  // Initialize the MPI environment
+  MPI(MPI_Init(&argc, &argv));
+  MPI(MPI_Barrier(MPI_COMM_WORLD));
+  time_start = MPI_Wtime();
+
+  //set error handler
+  MPI_Errhandler err_handler;
+  /*MPI(MPI_Comm_create_errhandler(&cholesky_mpi_error_handler, &err_handler));*/
+  /*MPI(MPI_Comm_set_errhandler(MPI_COMM_WORLD, err_handler));*/
+#ifdef DEBUG
+  MPI(MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN));
+#endif // DEBUG
+
+  // Get the number of processes
+  int np;
+  MPI(MPI_Comm_size(MPI_COMM_WORLD, &np));
+
+  // Get the rank of the process
+  int rank;
+  MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
+
+#ifdef WEAK_SCALING
+  n = N * np;
+#else // WEAK_SCALING
+  n = N;
+#endif // WEAK_SCALING
+  if (rank == ROOT_RANK){
+    printf("%d processes, total n = %d\n", np, n);
+  }
+  bmtime_t bmtime = benchmark(n, np, rank);
+  if (rank == ROOT_RANK){
+    printf("%d\t%.10lf\t%.10lf\n", n, bmtime.serial, bmtime.parallel);
+  }
+
+  MPI(MPI_Barrier(MPI_COMM_WORLD));
+  time_stop = MPI_Wtime();
+  /*if (rank == ROOT_RANK){*/
+    /*printf("Total job time / limit (10 min): %.2lf%%\n", (time_stop - time_start) / 60 / 10 * 100);*/
+  /*}*/
+
   //free error handler
   /*MPI_Errhandler_free( &err_handler );*/
   // Finalize the MPI environment.
   MPI_Finalize();
   return 0;
 }
+
