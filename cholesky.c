@@ -7,16 +7,15 @@
 #include <omp.h>
 
 //param
-//#define RUN_SERIAL
+/*#define RUN_SERIAL*/
 #define RUN_PARALLEL
-/*#define N 10000*/
 #define N 100
-/*#define WEAK_SCALING*/
-// if weak_scaling is not defined, n = N * np
+#define WEAK_SCALING
+// if weak_scaling is defined, n = N * np * omp_get_num_threads()
 
 //debug
-//#define DEBUG
-//#define VERBOSE
+/*#define DEBUG*/
+/*#define VERBOSE*/
 //printing precision
 #define PRECISION 2
 
@@ -151,7 +150,7 @@ inline int get_row(int np, int rank, int local_row){
 
 /* solve Ax = b */
 void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
-  int i, j, k, tag, receiver, mpi_result, row, *displs, *recvcounts, skipped_rows_count, sender;
+  int i, j, k, tag, receiver, mpi_result, row, skipped_rows_count, sender;
   int nrows_local = get_nrows(n, np, rank);
   double *local_a = malloc(sizeof(double) * n * nrows_local);
   double *local_a_t = malloc(sizeof(double) * n * nrows_local);
@@ -162,42 +161,42 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   assert(first_column != NULL);
   assert(allgather_buf != NULL);
   double tmp, aji;
-  MPI_Request *requests;
-  MPI_Status *statuses;
   int nrequests;
   if (rank == 0) nrequests = n - nrows_local;
   else nrequests = nrows_local;
-  requests = malloc(sizeof(MPI_Request) * nrequests);
-  statuses = malloc(sizeof(MPI_Status) * nrequests);
-  displs = malloc(sizeof(int) * np);
-  recvcounts = malloc(sizeof(int) * np);
+  MPI_Request *requests = malloc(sizeof(MPI_Request) * nrequests);
+  MPI_Status *statuses = malloc(sizeof(MPI_Status) * nrequests);
+  int *displs = malloc(sizeof(int) * np);
+  int *recvcounts = malloc(sizeof(int) * np);
+  assert(requests != NULL);
+  assert(statuses != NULL);
+  assert(displs != NULL);
+  assert(recvcounts != NULL);
 
   //root process
   if (rank == ROOT_RANK){
     j = 0;
     //deliver row data to each other processes from root process
-#pragma omp parallel for private(tag, receiver, k, i)
+#pragma omp parallel for private(tag, receiver, k)
     for(i = 0; i < n; i++){
       tag = i / np;
       receiver = i % np;
-      printf("hello from rank %d i = %d thread = %d\n", rank, i, omp_get_thread_num());
       if (receiver != 0){
 #pragma omp critical
         k = j++;
-        printf("hello from rank %d i = %d thread = %d isent %d\n", rank, i, omp_get_thread_num(), k);
         MPI(MPI_Isend(ELM(a, i, 0, n), i + 1, MPI_DOUBLE, receiver, tag, MPI_COMM_WORLD, requests + k));
       }
     }
     //copy to my own
     //(n + np - 1) / np = nrows_local
-#pragma omp parallel for private(row, i)
+#pragma omp parallel for private(row)
     for(i = 0; i < nrows_local; i++){
       row = get_row(np, rank, i);
       memcpy(ELM(local_a, i, 0, n), ELM(a, row, 0, n), sizeof(double) * (row + 1));
     }
   }else {
     //child process
-#pragma omp parallel for private(row, tag, i)
+#pragma omp parallel for private(row, tag)
     for(i = 0; i < nrows_local; i++){
       row = get_row(np, rank, i);
       tag = i;
@@ -212,11 +211,11 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   }
 
   //transpose to column major
-#pragma omp parallel for private(row, i)
+#pragma omp parallel for private(row)
   for(i = 0; i < nrows_local; i++){
     //also take diagonal elms
     row = get_row(np, rank, i);
-#pragma omp parallel for private(j)
+#pragma omp parallel for
     for(j = 0; j <= row; j++){
       *ELM(local_a_t, j, i, nrows_local) = *ELM(local_a, i, j, n);
     }
@@ -228,7 +227,6 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   }
   /* LDLT decomposition: A = L * D * L^t */
   for(i = 0; i < n; i++){
-#pragma omp parallel for private(j)
     for(j = 0; j < np; j++){
       recvcounts[j] = get_nrows(n, np, j) - get_nrows(i, np, j);
       displs[j] = j == 0 ? 0 : displs[j - 1] + recvcounts[j  -1];
@@ -250,9 +248,11 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
 #endif
 
     //put elms of collected buffer into correct order
-#pragma omp parallel for collapse(2) private(j, k)
+#pragma omp parallel for private(row)
     for(j = 0; j < np; j++){
-      for(k = 0; k < recvcounts[j]; k++)
+      row = recvcounts[j];
+#pragma omp parallel for
+      for(k = 0; k < row; k++)
         first_column[(k + get_nrows(i, np, j)) * np + j] = allgather_buf[displs[j] + k];
     }
 #ifdef VERBOSE
@@ -270,7 +270,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
 
     //pre devide first_column to speedup (reduce deviding operation)
     row = get_row(np, rank, nrows_local -1);
-#pragma omp parallel for private(j)
+#pragma omp parallel for
     for(j = i + 1; j <= row; j++)
       first_column[j] /= first_column[i];
 
@@ -278,7 +278,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     //for all rows
     skipped_rows_count = get_nrows(i + 1, np, rank);
     //get_nrows of i + 1 because we are going to skip the row i (do j-loop from i+ 1 to n)
-#pragma omp parallel for private(aji, row, j)
+#pragma omp parallel for private(aji, row)
     for(j = skipped_rows_count; j < nrows_local; j++){
       //backup aji
       aji = *ELM(local_a_t, i, j, nrows_local);
@@ -286,7 +286,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
       //first elm
       *ELM(local_a_t, i, j, nrows_local) = first_column[row];
       //other elms
-#pragma omp parallel for private(k)
+#pragma omp parallel for
       for(k = i + 1; k <= row; k++)
         *ELM(local_a_t, k, j, nrows_local) -= aji * first_column[k];
     }
@@ -311,11 +311,11 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   }
 
   //transpose back to row-major
-#pragma omp parallel for private(row, i)
+#pragma omp parallel for private(row)
   for(i = 0; i < nrows_local; i++){
     row = get_row(np, rank, i);
     //also take diagonal elms
-#pragma omp parallel for private(j)
+#pragma omp parallel for
     for(j = 0; j <= row; j++){
       *ELM(local_a, i, j, n) = *ELM(local_a_t, j, i, nrows_local);
     }
@@ -335,7 +335,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
   if (rank == ROOT_RANK){
     //receive calculated buffer from all processes
     j = 0;
-#pragma omp parallel for private(tag, sender, k, i)
+#pragma omp parallel for private(tag, sender, k)
     for(i = 0; i < n; i++){
       tag = i / np;
       sender = i % np;
@@ -347,7 +347,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     }
     //copy from my own
     //(n + np - 1) / np = nrows_local
-#pragma omp parallel for private(row, i)
+#pragma omp parallel for private(row)
     for(i = 0; i < nrows_local; i++){
       row = get_row(np, rank, i);
       memcpy(ELM(a, row, 0, n), ELM(local_a, i, 0, n), sizeof(double) * (row + 1));
@@ -373,7 +373,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     for (i=0; i< n; i++) {
       double t = b[i];
 
-#pragma omp parallel for reduction(-:t) private(j)
+#pragma omp parallel for reduction(-:t)
       for (j=0; j< i; j++)
         t -= *ELM(a, i, j, n) * x[j];
 
@@ -384,7 +384,7 @@ void solveSym(int rank, int np, int n, double *a, double *x, double *b) {
     for (i= n-1; i>= 0; i--) {
       double t = x[i] / *ELM(a, i, i, n);
 
-#pragma omp parallel for reduction(-:t) private(j)
+#pragma omp parallel for reduction(-:t)
       for (j= i+1; j< n; j++)
         t -= *ELM(a, j, i, n) * x[j];
 
@@ -544,7 +544,12 @@ int main(int argc, char **argv) {
   double time_start, time_stop;
 
   // Initialize the MPI environment
-  MPI(MPI_Init(&argc, &argv));
+  int provided;
+  MPI(MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided ));
+  if (MPI_THREAD_MULTIPLE != provided){
+    fprintf(stderr, "Expected mpi thread support %d but %d returned\n", MPI_THREAD_MULTIPLE, provided);
+    return 1;
+  }
   MPI(MPI_Barrier(MPI_COMM_WORLD));
   time_start = MPI_Wtime();
 
@@ -564,17 +569,18 @@ int main(int argc, char **argv) {
   int rank;
   MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
 
+  int nt;
+#pragma omp parallel
+#pragma omp master
+  nt = omp_get_num_threads();
 #ifdef WEAK_SCALING
-  n = N * np;
+  n = N * np * nt;
 #else // WEAK_SCALING
   n = N;
 #endif // WEAK_SCALING
-  if (rank == ROOT_RANK){
-    printf("%d processes, total n = %d\n", np, n);
-  }
   bmtime_t bmtime = benchmark(n, np, rank);
   if (rank == ROOT_RANK){
-    printf("%d\t%.10lf\t%.10lf\n", n, bmtime.serial, bmtime.parallel);
+    printf("%d\t%d\t%d\t%.10lf\t%.10lf\n", np, nt, n, bmtime.serial, bmtime.parallel);
   }
 
   MPI(MPI_Barrier(MPI_COMM_WORLD));

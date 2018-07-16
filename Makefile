@@ -15,4 +15,4 @@ compile:
 copy:
 	scp cholesky.c run.bash Makefile $(USER)@$(HOST):$(ROOT_DIR)
 clean:
-	rm -rf a.out err.log out.log core.*
+	rm -rf err.log out.log core.*
