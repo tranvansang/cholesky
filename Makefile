@@ -11,7 +11,7 @@ run:
 	qsub -N $(JOB_NAME) run.bash
 	#qsub -hold_jid $(JOB_NAME) -cwd echo "Job $(JOB_NAME) finished"
 compile:
-	mpicc -g cholesky.c -lm
+	mpicc -g cholesky.c -lm -fopenmp
 copy:
 	scp cholesky.c run.bash Makefile $(USER)@$(HOST):$(ROOT_DIR)
 clean:
